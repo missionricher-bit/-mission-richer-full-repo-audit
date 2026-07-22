@@ -1,1 +1,122 @@
+name: Mission Richer Full Repository Audit
+
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/full-repo-audit.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact OpenFermion version
+        uses: actions/checkout@v4
+        with:
+          repository: quantumlib/OpenFermion
+          ref: d48c12a638d2e57a1c051c24fffb4fdd1a070f36
+          path: upstream
+          fetch-depth: 1
+
+      - name: Audit issue premises
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, subprocess
+          from pathlib import Path
+
+          repo = Path("upstream")
+          linear = (repo / "src/openfermion/linalg/linear_qubit_operator.py").read_text()
+          symbolic = (repo / "src/openfermion/ops/operators/symbolic_operator.py").read_text()
+          workflows = repo / ".github/workflows"
+
+          def git(*args):
+              return subprocess.check_output(
+                  ["git", "-C", str(repo), *args], text=True
+              ).strip()
+
+          issue_1410_blocked = all([
+              "self.options.processes <= 1" in linear,
+              "functools.reduce(numpy.add" in linear,
+              "get_operator_groups(self.options.processes)" in linear,
+              "num_groups = min(num_groups, len(self.terms))" in symbolic,
+          ])
+
+          missing_n_auto = []
+          for path in sorted(workflows.glob("*.y*ml")):
+              text = path.read_text()
+              scheduled = (
+                  "nightly" in path.name.lower()
+                  or "schedule:" in text
+                  or "cron:" in text
+              )
+              if scheduled:
+                  for line in text.splitlines():
+                      if "check/pytest" in line and "-n auto" not in line:
+                          missing_n_auto.append({
+                              "file": path.relative_to(repo).as_posix(),
+                              "command": line.strip(),
+                          })
+
+          result = {
+              "evidence_label": "FULL REPOSITORY EXACT-COMMIT PREMISE AUDIT",
+              "repository": "quantumlib/OpenFermion",
+              "actual_commit": git("rev-parse", "HEAD"),
+              "tracked_file_count": len(git("ls-files").splitlines()),
+              "working_tree_clean": git("status", "--porcelain") == "",
+              "patch_applied": False,
+              "external_submission": False,
+              "issue_1410": {
+                  "status": (
+                      "BLOCKED_UNSUPPORTED_PREMISE"
+                      if issue_1410_blocked
+                      else "CANDIDATE_PREMISE_SUPPORTED"
+                  )
+              },
+              "issue_1428": {
+                  "status": (
+                      "CANDIDATE_PREMISE_SUPPORTED"
+                      if missing_n_auto
+                      else "BLOCKED_NOT_PRESENT_AT_RECORDED_COMMIT"
+                  ),
+                  "commands_missing_n_auto": missing_n_auto,
+              },
+          }
+
+          Path("FULL_REPO_AUDIT_RESULTS.json").write_text(
+              json.dumps(result, indent=2)
+          )
+          Path("FULL_REPO_AUDIT_SUMMARY.md").write_text(
+              "# Full Repository Premise Audit\n\n"
+              f"- Commit: `{result['actual_commit']}`\n"
+              f"- Tracked files: {result['tracked_file_count']}\n"
+              f"- Issue #1410: `{result['issue_1410']['status']}`\n"
+              f"- Issue #1428: `{result['issue_1428']['status']}`\n"
+              "- Patch applied: no\n"
+              "- External submission: no\n"
+          )
+          for name in [
+              "FULL_REPO_AUDIT_RESULTS.json",
+              "FULL_REPO_AUDIT_SUMMARY.md",
+          ]:
+              Path(name + ".sha256").write_text(
+                  hashlib.sha256(Path(name).read_bytes()).hexdigest() + "\n"
+              )
+          PY
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: mission-richer-full-repo-premise-audit
+          retention-days: 30
+          path: |
+            FULL_REPO_AUDIT_RESULTS.json
+            FULL_REPO_AUDIT_RESULTS.json.sha256
+            FULL_REPO_AUDIT_SUMMARY.md
+            FULL_REPO_AUDIT_SUMMARY.md.sha256
 
